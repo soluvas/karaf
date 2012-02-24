@@ -128,10 +128,9 @@ public class Main {
             		batchSb.append(line + '\n');
             		line = inReader.readLine();
             	}
-            	batchSb.append('\004'); // EOF
- 				channel = session.createChannel("shell");
-                channel.setIn(new ByteArrayInputStream(batchSb.toString().getBytes()));
-                ((ChannelShell) channel).setupSensibleDefaultPty();
+            	// then execute them together as one huge blob of command
+                channel = session.createChannel("exec", batchSb.toString());
+                channel.setIn(new ByteArrayInputStream(new byte[0]));
             } else if (sb.length() > 0) {
                 channel = session.createChannel("exec", sb.append("\n").toString());
                 channel.setIn(new ByteArrayInputStream(new byte[0]));
