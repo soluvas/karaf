@@ -52,6 +52,7 @@ import org.fusesource.jansi.AnsiConsole;
 public class Main {
     private String application = System.getProperty("karaf.name", "root");
     private String user = "karaf";
+    private boolean batchMode = false;
 
     public static void main(String args[]) throws Exception {
         Main main = new Main();
@@ -71,22 +72,12 @@ public class Main {
 
         CommandProcessorImpl commandProcessor = new CommandProcessorImpl(threadio);
 
-        ClassLoader cl = Main.class.getClassLoader();
-        if (args.length > 0 && args[0].startsWith("--classpath=")) {
-            String base = args[0].substring("--classpath=".length());
-            List<URL> urls = getFiles(new File(base));
-            cl = new URLClassLoader(urls.toArray(new URL[urls.size()]), cl);
-            String[] a = new String[args.length - 1];
-            System.arraycopy(args, 1, a, 0, a.length);
-            args = a;
-        }
-
-        discoverCommands(commandProcessor, cl);
+        String[] newArgs = processSwitches(args, commandProcessor);
 
         InputStream in = unwrap(System.in);
         PrintStream out = wrap(unwrap(System.out));
         PrintStream err = wrap(unwrap(System.err));
-        run(commandProcessor, args, in, out, err);
+        run(commandProcessor, newArgs, in, out, err);
 
         // TODO: do we need to stop the threadio that was started?
         // threadio.stop();
@@ -110,62 +101,107 @@ public class Main {
             }
         });
 
-        ClassLoader cl = Main.class.getClassLoader();
-        if (args.length > 0 && args[0].startsWith("--classpath=")) {
-            String base = args[0].substring("--classpath=".length());
-            List<URL> urls = getFiles(new File(base));
-            cl = new URLClassLoader(urls.toArray(new URL[urls.size()]), cl);
-            String[] a = new String[args.length - 1];
-            System.arraycopy(args, 1, a, 0, a.length);
-            args = a;
-        }
-
-        discoverCommands(commandProcessor, cl);
+        String[] newArgs = processSwitches(args, commandProcessor);
 
         InputStream in = parent.getKeyboard();
         PrintStream out = parent.getConsole();
         PrintStream err = parent.getConsole();
-        run(commandProcessor, args, in, out, err);
+        run(commandProcessor, newArgs, in, out, err);
     }
+
+	/**
+	 * Process switches, setup the classloader, and discovers commands.
+	 * 
+	 * @param origArgs
+	 * @param commandProcessor
+	 * @param cl
+	 * @return New argument list without the switches.
+	 * @throws MalformedURLException
+	 * @throws IOException
+	 * @throws ClassNotFoundException
+	 */
+	private String[] processSwitches(String[] origArgs,
+			CommandProcessorImpl commandProcessor)
+			throws MalformedURLException, IOException, ClassNotFoundException {
+        ClassLoader cl = Main.class.getClassLoader();
+
+        int cmdIndex = 0;
+        while (cmdIndex < origArgs.length) {
+        	String arg = origArgs[cmdIndex];
+        	if (!arg.startsWith("-"))	// it's not a switch, bail out
+        		break;
+        	
+        	if (arg.startsWith("--classpath=")) {
+                String base = origArgs[0].substring("--classpath=".length());
+                List<URL> urls = getFiles(new File(base));
+                cl = new URLClassLoader(urls.toArray(new URL[urls.size()]), cl);
+        	}
+        	if (arg.startsWith("-b") || arg.startsWith("--batch")) {
+        		setBatchMode(true);
+        	}
+        	
+        	cmdIndex++;
+        }
+        String[] newArgs = new String[origArgs.length - cmdIndex];
+        System.arraycopy(origArgs, cmdIndex, newArgs, 0, newArgs.length);
+
+        discoverCommands(commandProcessor, cl);
+        
+		return newArgs;
+	}
 
     private void run(final CommandProcessorImpl commandProcessor, String[] args, final InputStream in, final PrintStream out, final PrintStream err) throws Exception {
 
-        if (args.length > 0) {
-            StringBuilder sb = new StringBuilder();
-            for (int i = 0; i < args.length; i++) {
-                if (i > 0) {
-                    sb.append(" ");
+        if (args.length > 0 || isBatchMode()) {
+        	
+        	BufferedReader batchReader = new BufferedReader(new InputStreamReader(in));
+        	String line;
+        	if (isBatchMode()) {
+            	// Batch mode: get the first line
+            	line = batchReader.readLine();
+        	} else {
+                StringBuilder sb = new StringBuilder();
+                for (int i = 0; i < args.length; i++) {
+                    if (i > 0) {
+                        sb.append(" ");
+                    }
+                    sb.append(args[i]);
                 }
-                sb.append(args[i]);
-            }
-
+                line = sb.toString();
+        	}
+        	
             // Shell is directly executing a sub/command, we don't setup a terminal and console
-            // in this case, this avoids us reading from stdin un-necessarily.
+            // in this case, this avoids us reading from stdin un-necessarily in single-command mode.
             CommandSession session = commandProcessor.createSession(in,out, err);
             session.put("USER", user);
             session.put("APPLICATION", application);
             session.put(NameScoping.MULTI_SCOPE_MODE_KEY, Boolean.toString(isMultiScopeMode()));
 
-            try {
-                session.execute(sb);
-            } catch (Throwable t) {
-                if (t instanceof CommandNotFoundException) {
-                    String str = Ansi.ansi()
-                        .fg(Ansi.Color.RED)
-                        .a("Command not found: ")
-                        .a(Ansi.Attribute.INTENSITY_BOLD)
-                        .a(((CommandNotFoundException) t).getCommand())
-                        .a(Ansi.Attribute.INTENSITY_BOLD_OFF)
-                        .fg(Ansi.Color.DEFAULT).toString();
-                    session.getConsole().println(str);
-                } else if (t instanceof CommandException) {
-                    session.getConsole().println(((CommandException) t).getNiceHelp());
-                } else {
-                    session.getConsole().print(Ansi.ansi().fg(Ansi.Color.RED).toString());
-                    t.printStackTrace(session.getConsole());
-                    session.getConsole().print(Ansi.ansi().fg(Ansi.Color.DEFAULT).toString());
-                }
-            }
+        	while (line != null) {
+	            try {
+	                session.execute(line);
+	            } catch (Throwable t) {
+	                if (t instanceof CommandNotFoundException) {
+	                    String str = Ansi.ansi()
+	                        .fg(Ansi.Color.RED)
+	                        .a("Command not found: ")
+	                        .a(Ansi.Attribute.INTENSITY_BOLD)
+	                        .a(((CommandNotFoundException) t).getCommand())
+	                        .a(Ansi.Attribute.INTENSITY_BOLD_OFF)
+	                        .fg(Ansi.Color.DEFAULT).toString();
+	                    session.getConsole().println(str);
+	                } else if (t instanceof CommandException) {
+	                    session.getConsole().println(((CommandException) t).getNiceHelp());
+	                } else {
+	                    session.getConsole().print(Ansi.ansi().fg(Ansi.Color.RED).toString());
+	                    t.printStackTrace(session.getConsole());
+	                    session.getConsole().print(Ansi.ansi().fg(Ansi.Color.DEFAULT).toString());
+	                }
+	            }
+	            
+	            // for batch mode, read the next line
+	            line = batchReader.readLine();
+        	}
         } else {
             // We are going into full blown interactive shell mode.
 
@@ -318,4 +354,17 @@ public class Main {
             }
         }
     }
+
+    /**
+     * When batch mode is enabled, a full-blown console is not created.
+     * Commands are read directly from stdin, executed, then the program is terminated.
+     * @return Batch mode setting.
+     */
+	public boolean isBatchMode() {
+		return batchMode;
+	}
+
+	public void setBatchMode(boolean batchMode) {
+		this.batchMode = batchMode;
+	}
 }
