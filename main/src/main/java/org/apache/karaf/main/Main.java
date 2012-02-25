@@ -18,7 +18,16 @@
  */
 package org.apache.karaf.main;
 
-import java.io.*;
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
+import java.io.Writer;
 import java.lang.management.ManagementFactory;
 import java.lang.management.RuntimeMXBean;
 import java.net.InetAddress;
@@ -222,6 +231,30 @@ public class Main {
         System.setProperty(PROP_KARAF_BASE, karafBase.getPath());
         System.setProperty(PROP_KARAF_DATA, karafData.getPath());
         System.setProperty(PROP_KARAF_INSTANCES, karafInstances.getPath());
+        
+        boolean executeCommands = false;
+    	StringBuilder commands = new StringBuilder();
+    	for (int i = 0; i < args.length; i++) {
+    		String arg = args[i];
+    		if (!arg.startsWith("-"))
+    			break;
+    		if (arg.equals("-c")) {
+    			i++;
+    			commands.append(args[i] + "\n");
+    			executeCommands = true;
+    		}
+    		if (arg.startsWith("--command=")) {
+    			commands.append(arg.substring(10) + "\n");
+    			executeCommands = true;
+    		}
+    	}
+        if (executeCommands) {
+        	System.setProperty("karaf.commands", commands.toString());
+        	System.setProperty("karaf.executeCommands", "true");
+            // Disable console and SSH if in exec or batch mode
+	        System.setProperty("karaf.startLocalConsole", "false");
+	        System.setProperty("karaf.startRemoteShell", "false");
+        }
 
         // Load system properties.
         loadSystemProperties(karafBase);
@@ -254,7 +287,8 @@ public class Main {
         lockStartLevel = Integer.parseInt(configProps.getProperty(PROPERTY_LOCK_LEVEL, Integer.toString(lockStartLevel)));
         lockDelay = Integer.parseInt(configProps.getProperty(PROPERTY_LOCK_DELAY, Integer.toString(lockDelay)));
         configProps.setProperty(Constants.FRAMEWORK_BEGINNING_STARTLEVEL, Integer.toString(lockStartLevel));
-        shutdownTimeout = Integer.parseInt(configProps.getProperty(KARAF_SHUTDOWN_TIMEOUT, Integer.toString(shutdownTimeout)));
+        shutdownTimeout = Integer.parseInt(configProps.getProperty(KARAF_SHUTDOWN_TIMEOUT, Integer.toString(shutdownTimeout)));       
+        
         // Start up the OSGI framework
 
         String factoryClass = configProps.getProperty(KARAF_FRAMEWORK_FACTORY);
@@ -277,6 +311,9 @@ public class Main {
                 lock(configProps);
             }
         }.start();
+        
+        
+        
     }
 
     public void awaitShutdown() throws Exception {
