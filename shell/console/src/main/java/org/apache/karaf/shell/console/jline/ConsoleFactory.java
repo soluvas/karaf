@@ -36,6 +36,7 @@ import org.apache.felix.service.command.Converter;
 import org.apache.felix.service.command.Function;
 import org.apache.karaf.jaas.modules.UserPrincipal;
 import org.fusesource.jansi.AnsiConsole;
+import org.fusesource.jansi.internal.CLibrary;
 import org.osgi.framework.Bundle;
 import org.osgi.framework.BundleContext;
 import org.osgi.framework.BundleEvent;
