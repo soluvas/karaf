@@ -23,6 +23,7 @@ import java.io.OutputStream;
 import java.io.PrintStream;
 import java.lang.reflect.Method;
 import java.security.PrivilegedExceptionAction;
+import java.util.Hashtable;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -36,7 +37,6 @@ import org.apache.felix.service.command.Converter;
 import org.apache.felix.service.command.Function;
 import org.apache.karaf.jaas.modules.UserPrincipal;
 import org.fusesource.jansi.AnsiConsole;
-import org.fusesource.jansi.internal.CLibrary;
 import org.osgi.framework.Bundle;
 import org.osgi.framework.BundleContext;
 import org.osgi.framework.BundleEvent;
@@ -46,12 +46,13 @@ import org.osgi.framework.InvalidSyntaxException;
 import org.osgi.framework.ServiceEvent;
 import org.osgi.framework.ServiceListener;
 import org.osgi.framework.ServiceReference;
+import org.osgi.framework.ServiceRegistration;
 import org.osgi.service.blueprint.container.BlueprintEvent;
 import org.osgi.service.blueprint.container.BlueprintListener;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-public class ConsoleFactory implements BlueprintListener {
+public class ConsoleFactory implements BundleListener, ServiceListener, BlueprintListener {
 
 	private transient Logger log = LoggerFactory.getLogger(ConsoleFactory.class);
     private BundleContext bundleContext;
@@ -59,6 +60,16 @@ public class ConsoleFactory implements BlueprintListener {
     private TerminalFactory terminalFactory;
     private Console console;
     private boolean start;
+    private RuntimeStatus runtimeStatus = new RuntimeStatus();
+    private AtomicBoolean executorInvoked = new AtomicBoolean(false);
+    private ServiceRegistration blueprintListenerReg;
+    
+	class RuntimeStatus {
+		public int events;
+		public int activeServices;
+		public int unstableBundles;
+		public int unstableBlueprints;
+    }
 
     public void setBundleContext(BundleContext bundleContext) {
         this.bundleContext = bundleContext;
@@ -68,7 +79,7 @@ public class ConsoleFactory implements BlueprintListener {
         this.commandProcessor = commandProcessor;
         start();
         if (Boolean.getBoolean("karaf.executeCommands"))
-        	monitorStartLevel(bundleContext);
+        	prepareExecuteCommands();
     }
 
     public synchronized void unregisterCommandProcessor(CommandProcessor commandProcessor) throws Exception {
@@ -158,8 +169,81 @@ public class ConsoleFactory implements BlueprintListener {
             return stream;
         }
     }
-    
-    private void executeCommands(final BundleContext bundleCtx) {
+
+    /**
+     * Sets up listeners to monitor the runtime state, waits until the runtime
+     * is "stable" (all services and bundles are active, etc.) then invokes the commands executor.
+     */
+    private void prepareExecuteCommands() {
+    	Bundle[] bundles = bundleContext.getBundles();
+    	synchronized (runtimeStatus) {
+    		// Temporarily add self as listeners
+        	bundleContext.addBundleListener(this);
+        	bundleContext.addServiceListener(this);
+        	// Get current number of unstable bundles
+	    	for (Bundle bundle : bundles) {
+	    		if (bundle.getState() == Bundle.STARTING || bundle.getState() == Bundle.STOPPING) {
+	    			runtimeStatus.unstableBundles++;
+	    		}
+	    	}
+	    	// Get current number of active services
+			try {
+				ServiceReference[] services = bundleContext.getAllServiceReferences(null, null);
+				runtimeStatus.activeServices = services.length;
+			} catch (InvalidSyntaxException e) {
+			}
+    	}
+    	// Register Blueprint listener, must be last to avoid deadlock on runtimeStatus
+    	blueprintListenerReg = bundleContext.registerService(BlueprintListener.class.getName(), this, new Hashtable<String, String>());
+	}
+
+	public void bundleChanged(BundleEvent event) {
+		synchronized (runtimeStatus) {
+			runtimeStatus.events++;
+			if (event.getType() == BundleEvent.STARTED || event.getType() == BundleEvent.STOPPED) {
+				runtimeStatus.unstableBundles--;
+			} else if (event.getType() == BundleEvent.STARTING || event.getType() == BundleEvent.STOPPING) {
+				runtimeStatus.unstableBundles++;
+			}
+			runtimeStatus.notifyAll();
+		}
+		invokeExecutorIfStable();
+	}
+
+	public void serviceChanged(ServiceEvent event) {
+		synchronized (runtimeStatus) {
+			runtimeStatus.events++;
+			if (event.getType() == ServiceEvent.REGISTERED) {
+				runtimeStatus.activeServices++;
+//				System.out.print(sth.activeServices + " ");
+			} else if (event.getType() == ServiceEvent.UNREGISTERING) {
+				runtimeStatus.activeServices--;
+//				System.out.print(sth.activeServices + " ");
+			}
+			runtimeStatus.notifyAll();
+		}
+		invokeExecutorIfStable();
+	}
+
+	public void blueprintEvent(BlueprintEvent event) {
+		synchronized (runtimeStatus) {
+			runtimeStatus.events++;
+			if (event.getType() == BlueprintEvent.CREATING || event.getType() == BlueprintEvent.WAITING || event.getType() == BlueprintEvent.DESTROYING) {
+				runtimeStatus.unstableBlueprints++;
+			} else if (event.getType() == BlueprintEvent.CREATED || event.getType() == BlueprintEvent.FAILURE || event.getType() == BlueprintEvent.DESTROYED) {
+				if (runtimeStatus.unstableBlueprints > 0)
+					runtimeStatus.unstableBlueprints--;
+			}
+			runtimeStatus.notifyAll();
+		}
+		invokeExecutorIfStable();
+	}
+	
+    /**
+     * Creates a non-terminal session, executes commands in <tt>karaf.commands</tt>
+     * then immediately shuts down the OSGi runtime.
+     */
+    private void executeCommands() {
 		String commands = System.getProperty("karaf.commands", "");
 		log.info("Executing: {}", commands);
 //		System.out.println("Executing: "+ commands);
@@ -195,7 +279,11 @@ public class ConsoleFactory implements BlueprintListener {
 		}
     }
     
-    private void waitForStable(final BundleContext bundleCtx) {
+    /**
+     * Waits for OSGi runtime to stabilize for the last time, then executes commands in "karaf.commands"
+     * by calling {@link ConsoleFactory#executeCommands()}.
+     */
+    private void invokeExecutor() {
     	log.info("Waiting for OSGi runtime to stabilize");
     	new Thread("Wait for stable") {
     		@Override
@@ -203,14 +291,23 @@ public class ConsoleFactory implements BlueprintListener {
 				while (true) {
 					try {
     					int lastEvents; 
-		    			synchronized (sth) {
-	    					lastEvents = sth.events; 
-							sth.wait(100);
+		    			synchronized (runtimeStatus) {
+	    					lastEvents = runtimeStatus.events; 
+							runtimeStatus.wait(100);
 //							System.out.print("*" + sth.activeServices + " ");
-							if (lastEvents == sth.events && sth.unstableBundles <= 0 && sth.unstableBlueprints <= 0) {
-								log.info("Time to launch command! {} services found", sth.activeServices);
+							if (lastEvents == runtimeStatus.events && runtimeStatus.unstableBundles <= 0 && runtimeStatus.unstableBlueprints <= 0) {
+								log.info("Time to launch command! {} services found", runtimeStatus.activeServices);
 //								System.out.println(String.format("Time to launch command! %d services found", sth.activeServices));
-								executeCommands(bundleCtx);
+								
+								// Unregister listeners
+								if (blueprintListenerReg != null) {
+									blueprintListenerReg.unregister();
+									blueprintListenerReg = null;
+								}
+								bundleContext.removeServiceListener(ConsoleFactory.this);
+								bundleContext.removeBundleListener(ConsoleFactory.this);
+								
+								executeCommands();
 								break;
 							}
 		    			}
@@ -223,86 +320,15 @@ public class ConsoleFactory implements BlueprintListener {
     	}.start();
 	}
 
-	class Something {
-		public int events;
-		public int activeServices;
-		public int unstableBundles;
-		public int unstableBlueprints;
-    }
-    private Something sth = new Something();
-    private AtomicBoolean waitingForStable = new AtomicBoolean();
-    
-    private void monitorStartLevel(final BundleContext context) {
-    	Bundle[] bundles = context.getBundles();
-    	synchronized (sth) {
-        	context.addBundleListener(new BundleListener() {
-    			
-    			public void bundleChanged(BundleEvent event) {
-    				synchronized (sth) {
-    					sth.events++;
-    					if (event.getType() == BundleEvent.STARTED || event.getType() == BundleEvent.STOPPED) {
-    						sth.unstableBundles--;
-    					} else if (event.getType() == BundleEvent.STARTING || event.getType() == BundleEvent.STOPPING) {
-    						sth.unstableBundles++;
-    					}
-    						
-    					boolean prevState = waitingForStable.getAndSet(waitingForStable.get() ||
-    							(sth.activeServices >= 1 && sth.unstableBundles <= 0 && sth.unstableBlueprints <= 0));
-    					if (prevState == false && waitingForStable.get()) {
-    						waitForStable(context);
-    					}
-    					sth.notifyAll();
-    				}
-    			}
-    		});
-        	
-        	context.addServiceListener(new ServiceListener() {
-    			public void serviceChanged(ServiceEvent event) {
-    				synchronized (sth) {
-    					sth.events++;
-    					if (event.getType() == ServiceEvent.REGISTERED) {
-    						sth.activeServices++;
-//    						System.out.print(sth.activeServices + " ");
-    					} else if (event.getType() == ServiceEvent.UNREGISTERING) {
-    						sth.activeServices--;
-//    						System.out.print(sth.activeServices + " ");
-    					}
-    					boolean prevState = waitingForStable.getAndSet(waitingForStable.get() ||
-    							(sth.activeServices >= 1 && sth.unstableBundles <= 0 && sth.unstableBlueprints <= 0));
-    					if (prevState == false && waitingForStable.get()) {
-    						waitForStable(context);
-    					}
-    					sth.notifyAll();
-    				}
-    			}
-    		});
-    		
-        	// Get current number of unstable bundles
-	    	for (Bundle bundle : bundles) {
-	    		if (bundle.getState() == Bundle.STARTING || bundle.getState() == Bundle.STOPPING) {
-	    			sth.unstableBundles++;
-	    		}
-	    	}
-	    	// Get current number of active services
-			try {
-				ServiceReference[] services = context.getAllServiceReferences(null, null);
-				sth.activeServices = services.length;
-			} catch (InvalidSyntaxException e) {
-			}
-    	}
-	}
-
-	public void blueprintEvent(BlueprintEvent event) {
-		synchronized (sth) {
-			sth.events++;
-			if (event.getType() == BlueprintEvent.CREATING || event.getType() == BlueprintEvent.WAITING || event.getType() == BlueprintEvent.DESTROYING) {
-				sth.unstableBlueprints++;
-			} else if (event.getType() == BlueprintEvent.CREATED || event.getType() == BlueprintEvent.FAILURE || event.getType() == BlueprintEvent.DESTROYED) {
-				if (sth.unstableBlueprints > 0)
-					sth.unstableBlueprints--;
-			}
-			sth.notifyAll();
+    /**
+     * Checks if the OSGi runtime is "stable" and calls {@link ConsoleFactory#invokeExecutor()}.
+     */
+    private void invokeExecutorIfStable() {
+		boolean prevState = executorInvoked.getAndSet(executorInvoked.get() ||
+				(runtimeStatus.unstableBundles <= 0 && runtimeStatus.unstableBlueprints <= 0));
+		if (prevState == false && executorInvoked.get()) {
+			invokeExecutor();
 		}
-	}
-	
+    }
+    
 }
