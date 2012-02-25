@@ -18,7 +18,6 @@ package org.apache.karaf.client;
 
 import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
-import java.io.InputStream;
 import java.io.InputStreamReader;
 
 import jline.Terminal;
