@@ -18,7 +18,16 @@
  */
 package org.apache.karaf.main;
 
-import java.io.*;
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
+import java.io.Writer;
 import java.lang.management.ManagementFactory;
 import java.lang.management.RuntimeMXBean;
 import java.net.InetAddress;
@@ -130,6 +139,10 @@ public class Main {
      * The system property for holding the Karaf version.
      */
     public static final String PROP_KARAF_VERSION = "karaf.version";
+    /**
+     * The system property for holding the Karaf command line arguments parsing feature.
+     */
+    public static final String PROP_KARAF_ARGS_PARSE = "karaf.args.parse";
 
     /**
      * Config property which identifies directories which contain bundles to be loaded by SMX
@@ -199,6 +212,7 @@ public class Main {
     private int shutdownTimeout = 5 * 60 * 1000;
     private boolean exiting = false;
     private ShutdownCallback shutdownCallback;
+    private boolean argsParse = true;
 
     public Main(String[] args) {
         this.args = args;
@@ -222,7 +236,7 @@ public class Main {
         System.setProperty(PROP_KARAF_BASE, karafBase.getPath());
         System.setProperty(PROP_KARAF_DATA, karafData.getPath());
         System.setProperty(PROP_KARAF_INSTANCES, karafInstances.getPath());
-
+        
         // Load system properties.
         loadSystemProperties(karafBase);
 
@@ -255,6 +269,49 @@ public class Main {
         lockDelay = Integer.parseInt(configProps.getProperty(PROPERTY_LOCK_DELAY, Integer.toString(lockDelay)));
         configProps.setProperty(Constants.FRAMEWORK_BEGINNING_STARTLEVEL, Integer.toString(lockStartLevel));
         shutdownTimeout = Integer.parseInt(configProps.getProperty(KARAF_SHUTDOWN_TIMEOUT, Integer.toString(shutdownTimeout)));
+        argsParse = Boolean.parseBoolean(configProps.getProperty(PROP_KARAF_ARGS_PARSE, "true"));
+
+        // Parse command line arguments... if not disabled
+        if (argsParse) {
+	        boolean executeCommands = false;
+	        boolean batchMode = false;
+	    	StringBuilder commands = new StringBuilder();
+	    	for (int i = 0; i < args.length; i++) {
+	    		String arg = args[i];
+	    		if (!arg.startsWith("-"))
+	    			break;
+	    		if (arg.equals("-c")) {
+	    			i++;
+	    			commands.append(args[i] + "\n");
+	    			executeCommands = true;
+	    		}
+	    		if (arg.startsWith("--command=")) {
+	    			commands.append(arg.substring(10) + "\n");
+	    			executeCommands = true;
+	    		}
+	    		if (arg.equals("-b") || arg.equals("--batch")) {
+	    			batchMode = true;
+	    			executeCommands = true;
+	    		}
+	    	}
+	    	if (batchMode) {
+	    		// Read commands from stdin
+	    		BufferedReader inReader = new BufferedReader(new InputStreamReader(System.in));
+	    		String line = inReader.readLine();
+	    		while (line != null) {
+	    			commands.append(line + "\n");
+	    			line = inReader.readLine();
+	    		}
+	    	}
+	        if (executeCommands) {
+	        	System.setProperty("karaf.commands", commands.toString());
+	        	System.setProperty("karaf.executeCommands", "true");
+	            // Disable console and SSH if in exec or batch mode
+		        System.setProperty("karaf.startLocalConsole", "false");
+		        System.setProperty("karaf.startRemoteShell", "false");
+	        }
+        }
+
         // Start up the OSGI framework
 
         String factoryClass = configProps.getProperty(KARAF_FRAMEWORK_FACTORY);
@@ -277,6 +334,9 @@ public class Main {
                 lock(configProps);
             }
         }.start();
+        
+        
+        
     }
 
     public void awaitShutdown() throws Exception {
