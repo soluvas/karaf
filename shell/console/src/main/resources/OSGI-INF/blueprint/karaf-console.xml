@@ -37,7 +37,6 @@
         <property name="bundleContext" ref="blueprintBundleContext"/>
         <property name="terminalFactory" ref="terminalFactory"/>
     </bean>
-    <service interface="org.osgi.service.blueprint.container.BlueprintListener" ref="consoleFactory"/>
 
     <bean id="converters" class="org.apache.karaf.shell.console.Converters">
         <argument ref="blueprintBundleContext"/>
