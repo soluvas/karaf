@@ -38,6 +38,8 @@ import org.apache.karaf.jaas.modules.UserPrincipal;
 import org.apache.sshd.agent.SshAgent;
 import org.apache.sshd.agent.local.AgentImpl;
 import org.fusesource.jansi.AnsiConsole;
+import org.fusesource.jansi.internal.CLibrary;
+import org.osgi.framework.Bundle;
 import org.osgi.framework.BundleContext;
 import org.osgi.framework.ServiceRegistration;
 import org.slf4j.Logger;
