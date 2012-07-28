@@ -16,10 +16,12 @@
  */
 package org.apache.karaf.client;
 
-import java.io.BufferedInputStream;
+import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
+import java.io.InputStreamReader;
 
 import jline.Terminal;
+
 import org.apache.karaf.shell.console.jline.TerminalFactory;
 import org.apache.sshd.ClientChannel;
 import org.apache.sshd.ClientSession;
@@ -27,7 +29,6 @@ import org.apache.sshd.SshClient;
 import org.apache.sshd.client.channel.ChannelShell;
 import org.apache.sshd.client.future.ConnectFuture;
 import org.apache.sshd.common.RuntimeSshException;
-
 import org.apache.sshd.common.util.NoCloseInputStream;
 import org.fusesource.jansi.AnsiConsole;
 import org.slf4j.impl.SimpleLogger;
@@ -36,7 +37,7 @@ import org.slf4j.impl.SimpleLogger;
  * A very simple
  */
 public class Main {
-
+	
     public static void main(String[] args) throws Exception {
         String host = "localhost";
         int port = 8101;
@@ -46,6 +47,7 @@ public class Main {
         int level = 1;
         int retryAttempts = 0;
         int retryDelay = 2;
+        boolean batchMode = false;
 
         for (int i = 0; i < args.length; i++) {
             if (args[i].charAt(0) == '-') {
@@ -63,6 +65,8 @@ public class Main {
                     retryAttempts = Integer.parseInt(args[++i]);
                 } else if (args[i].equals("-d")) {
                     retryDelay = Integer.parseInt(args[++i]);
+                } else if (args[i].equals("-b") || args[i].equals("--batch")) {
+                    batchMode = true;
                 } else if (args[i].equals("--help")) {
                     System.out.println("Apache Karaf client");
                     System.out.println("  -a [port]     specify the port to connect to");
@@ -73,8 +77,9 @@ public class Main {
                     System.out.println("  -v            raise verbosity");
                     System.out.println("  -r [attempts] retry connection establishment (up to attempts times)");
                     System.out.println("  -d [delay]    intra-retry delay (defaults to 2 seconds)");
-                    System.out.println("  [commands]    commands to run");
-                    System.out.println("If no commands are specified, the client will be put in an interactive mode");
+                    System.out.println("  -b, --batch   batch mode, specify multiple commands via standard input");
+                    System.out.println("  [command]     command to run");
+                    System.out.println("If no command is specified, the client will be put in an interactive mode");
                     System.exit(0);
                 } else {
                     System.err.println("Unknown option: " + args[i]);
@@ -113,7 +118,19 @@ public class Main {
                 throw new Exception("Authentication failure");
             }
             ClientChannel channel;
-			if (sb.length() > 0) {
+            if (batchMode) {
+            	// read all stdin
+            	BufferedReader inReader = new BufferedReader(new InputStreamReader(System.in));
+            	StringBuffer batchSb = new StringBuffer();
+            	String line = inReader.readLine();
+            	while (line != null) {
+            		batchSb.append(line + '\n');
+            		line = inReader.readLine();
+            	}
+            	// then execute them together as one huge blob of command
+                channel = session.createChannel("exec", batchSb.toString());
+                channel.setIn(new ByteArrayInputStream(new byte[0]));
+            } else if (sb.length() > 0) {
                 channel = session.createChannel("exec", sb.append("\n").toString());
                 channel.setIn(new ByteArrayInputStream(new byte[0]));
 			} else {
