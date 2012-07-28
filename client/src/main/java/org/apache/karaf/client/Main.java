@@ -123,7 +123,19 @@ public class Main {
                 }
             }
             ClientChannel channel;
-			if (sb.length() > 0) {
+            if (batchMode) {
+            	// read all stdin
+            	BufferedReader inReader = new BufferedReader(new InputStreamReader(System.in));
+            	StringBuffer batchSb = new StringBuffer();
+            	String line = inReader.readLine();
+            	while (line != null) {
+            		batchSb.append(line + '\n');
+            		line = inReader.readLine();
+            	}
+            	// then execute them together as one huge blob of command
+                channel = session.createChannel("exec", batchSb.toString());
+                channel.setIn(new ByteArrayInputStream(new byte[0]));
+            } else if (sb.length() > 0) {
                 channel = session.createChannel("exec", sb.append("\n").toString());
                 channel.setIn(new ByteArrayInputStream(new byte[0]));
 			} else {
