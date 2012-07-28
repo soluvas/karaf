@@ -26,9 +26,13 @@ import java.lang.reflect.Method;
 import java.net.URL;
 import java.security.KeyPair;
 import java.security.PrivilegedExceptionAction;
+import java.util.ArrayList;
 import java.util.Hashtable;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.security.auth.Subject;
 
@@ -72,11 +76,65 @@ public class ConsoleFactory implements BundleListener, ServiceListener, Blueprin
     private AtomicBoolean executorInvoked = new AtomicBoolean(false);
     private ServiceRegistration blueprintListenerReg;
     
-	class RuntimeStatus {
-		public int events;
-		public int activeServices;
-		public int unstableBundles;
-		public int unstableBlueprints;
+    /**
+     * Helper class used to wait bundles/services/blueprints to be ready before
+     * launching (batch) command(s) passed via command line arguments.
+     * @author ceefour
+     */
+	protected static class RuntimeStatus {
+		/**
+		 * Number of OSGi framework events that has happened so far.
+		 */
+		public volatile AtomicInteger events = new AtomicInteger();
+		public Map<String, Integer> bundles = new ConcurrentHashMap<String, Integer>();
+		public Map<String, Integer> blueprints = new ConcurrentHashMap<String, Integer>();
+		
+		private String formatBundleSlug(Bundle bundle) {
+			return String.format("%s-%s [%d]", bundle.getSymbolicName(),
+					bundle.getVersion(), bundle.getBundleId());			
+		}
+		
+		public void updateBundle(Bundle bundle, int status) {
+			bundles.put(formatBundleSlug(bundle), status);
+		}
+		
+		public void updateBlueprint(Bundle bundle, int status) {
+			blueprints.put(formatBundleSlug(bundle), status);
+		}
+		
+		public List<String> getUnstableBundles() {
+			List<String> result = new ArrayList<String>();
+			for (Map.Entry<String, Integer> entry : bundles.entrySet()) {
+				switch (entry.getValue()) {
+				case Bundle.INSTALLED:
+					result.add("Bundle " + entry.getKey() + " is not resolved");
+					break;
+				case Bundle.STARTING:
+					result.add("Bundle " + entry.getKey() + " is starting");
+					break;
+				case Bundle.STOPPING:
+					result.add("Bundle " + entry.getKey() + " is stopping");
+					break;
+				}
+			}
+			for (Map.Entry<String, Integer> entry : blueprints.entrySet()) {
+				switch (entry.getValue()) {
+				case BlueprintEvent.CREATING:
+					result.add("Blueprint is creating " + entry.getKey());
+					break;
+				case BlueprintEvent.WAITING:
+					result.add("Blueprint is waiting" + entry.getKey());
+					break;
+				case BlueprintEvent.DESTROYING:
+					result.add("Blueprint is destroying " + entry.getKey());
+					break;
+				case BlueprintEvent.GRACE_PERIOD:
+					result.add("Blueprint is in grace period for " + entry.getKey());
+					break;
+				}
+			}
+			return result;
+		}
     }
 
     public void setBundleContext(BundleContext bundleContext) {
@@ -231,67 +289,59 @@ public class ConsoleFactory implements BundleListener, ServiceListener, Blueprin
      */
     private void prepareExecuteCommands() {
     	Bundle[] bundles = bundleContext.getBundles();
-    	synchronized (runtimeStatus) {
-    		// Temporarily add self as listeners
-        	bundleContext.addBundleListener(this);
-        	bundleContext.addServiceListener(this);
-        	// Get current number of unstable bundles
-	    	for (Bundle bundle : bundles) {
-	    		if (bundle.getState() == Bundle.STARTING || bundle.getState() == Bundle.STOPPING) {
-	    			runtimeStatus.unstableBundles++;
-	    		}
-	    	}
-	    	// Get current number of active services
-			try {
-				ServiceReference[] services = bundleContext.getAllServiceReferences(null, null);
-				runtimeStatus.activeServices = services.length;
-			} catch (InvalidSyntaxException e) {
-			}
+		// Temporarily add self as listeners
+    	bundleContext.addBundleListener(this);
+    	bundleContext.addServiceListener(this);
+    	// Get current number of unstable bundles
+    	for (Bundle bundle : bundles) {
+    		if (bundle.getState() == Bundle.STARTING || bundle.getState() == Bundle.STOPPING) {
+    			runtimeStatus.updateBundle(bundle,  bundle.getState());
+    		}
     	}
+    	// Get current number of active services
+		try {
+			ServiceReference[] services = bundleContext.getAllServiceReferences(null, null);
+//			runtimeStatus.activeServices = services.length;
+		} catch (InvalidSyntaxException e) {
+		}
     	// Register Blueprint listener, must be last to avoid deadlock on runtimeStatus
     	blueprintListenerReg = bundleContext.registerService(BlueprintListener.class.getName(), this, new Hashtable<String, String>());
 	}
 
 	public void bundleChanged(BundleEvent event) {
-		synchronized (runtimeStatus) {
-			runtimeStatus.events++;
-			if (event.getType() == BundleEvent.STARTED || event.getType() == BundleEvent.STOPPED) {
-				runtimeStatus.unstableBundles--;
-			} else if (event.getType() == BundleEvent.STARTING || event.getType() == BundleEvent.STOPPING) {
-				runtimeStatus.unstableBundles++;
-			}
-			runtimeStatus.notifyAll();
+		runtimeStatus.events.incrementAndGet();
+		if (event.getType() == BundleEvent.STARTED || event.getType() == BundleEvent.STOPPED) {
+			runtimeStatus.updateBundle(event.getBundle(), event.getBundle().getState());
+		} else if (event.getType() == BundleEvent.STARTING || event.getType() == BundleEvent.STOPPING) {
+			runtimeStatus.updateBundle(event.getBundle(), event.getBundle().getState());
 		}
-		invokeExecutorIfStable();
+		if (runtimeStatus.getUnstableBundles().isEmpty()) {
+			synchronized (runtimeStatus) {
+				runtimeStatus.notify();
+			}
+			invokeExecutorIfStable();
+		}
 	}
 
 	public void serviceChanged(ServiceEvent event) {
-		synchronized (runtimeStatus) {
-			runtimeStatus.events++;
-			if (event.getType() == ServiceEvent.REGISTERED) {
-				runtimeStatus.activeServices++;
-//				System.out.print(sth.activeServices + " ");
-			} else if (event.getType() == ServiceEvent.UNREGISTERING) {
-				runtimeStatus.activeServices--;
-//				System.out.print(sth.activeServices + " ");
+		runtimeStatus.events.incrementAndGet();
+		if (runtimeStatus.getUnstableBundles().isEmpty()) {
+			synchronized (runtimeStatus) {
+				runtimeStatus.notify();
 			}
-			runtimeStatus.notifyAll();
+			invokeExecutorIfStable();
 		}
-		invokeExecutorIfStable();
 	}
 
 	public void blueprintEvent(BlueprintEvent event) {
-		synchronized (runtimeStatus) {
-			runtimeStatus.events++;
-			if (event.getType() == BlueprintEvent.CREATING || event.getType() == BlueprintEvent.WAITING || event.getType() == BlueprintEvent.DESTROYING) {
-				runtimeStatus.unstableBlueprints++;
-			} else if (event.getType() == BlueprintEvent.CREATED || event.getType() == BlueprintEvent.FAILURE || event.getType() == BlueprintEvent.DESTROYED) {
-				if (runtimeStatus.unstableBlueprints > 0)
-					runtimeStatus.unstableBlueprints--;
+		runtimeStatus.events.incrementAndGet();
+		runtimeStatus.updateBlueprint(event.getBundle(), event.getType());
+		if (runtimeStatus.getUnstableBundles().isEmpty()) {
+			synchronized (runtimeStatus) {
+				runtimeStatus.notify();
 			}
-			runtimeStatus.notifyAll();
+			invokeExecutorIfStable();
 		}
-		invokeExecutorIfStable();
 	}
 	
     /**
@@ -326,6 +376,7 @@ public class ConsoleFactory implements BundleListener, ServiceListener, Blueprin
 		}
 
 		// Shutdown OSGi Runtime
+		log.info("Command has been executed, shutting down OSGi runtime");
         Bundle bundle = bundleContext.getBundle(0);
         try {
 			bundle.stop();
@@ -345,27 +396,36 @@ public class ConsoleFactory implements BundleListener, ServiceListener, Blueprin
     		public void run() {
 				while (true) {
 					try {
-    					int lastEvents; 
+						// save the current state before waiting
+						int lastEvents = runtimeStatus.events.get();
+						final List<String> preUnstableBundles = runtimeStatus.getUnstableBundles();
+						final long waitTime = preUnstableBundles.size() > 0 ? 5000 : 10;
+						log.info("Waiting {} ms for {} unstable bundles before launching command: {}",
+								new Object[] { waitTime, preUnstableBundles.size(), preUnstableBundles });
 		    			synchronized (runtimeStatus) {
-	    					lastEvents = runtimeStatus.events; 
-							runtimeStatus.wait(100);
-//							System.out.print("*" + sth.activeServices + " ");
-							if (lastEvents == runtimeStatus.events && runtimeStatus.unstableBundles <= 0 && runtimeStatus.unstableBlueprints <= 0) {
-								log.info("Time to launch command! {} services found", runtimeStatus.activeServices);
-//								System.out.println(String.format("Time to launch command! %d services found", sth.activeServices));
-								
-								// Unregister listeners
-								if (blueprintListenerReg != null) {
-									blueprintListenerReg.unregister();
-									blueprintListenerReg = null;
-								}
-								bundleContext.removeServiceListener(ConsoleFactory.this);
-								bundleContext.removeBundleListener(ConsoleFactory.this);
-								
-								executeCommands();
-								break;
-							}
+		    				runtimeStatus.wait(waitTime);
 		    			}
+
+//							System.out.print("*" + sth.activeServices + " ");
+						final List<String> postUnstableBundles = runtimeStatus.getUnstableBundles();
+						// launch command if there are no more events, and all bundles are stable
+						if (lastEvents == runtimeStatus.events.get() /*&& runtimeStatus.unstableBundles <= 0*/ && 
+								postUnstableBundles.size() <= 0) {
+//								log.info("Time to launch command! {} services found", runtimeStatus.activeServices);
+							log.info("Time to launch command!");
+//								System.out.println(String.format("Time to launch command! %d services found", sth.activeServices));
+							
+							// Unregister listeners
+							if (blueprintListenerReg != null) {
+								blueprintListenerReg.unregister();
+								blueprintListenerReg = null;
+							}
+							bundleContext.removeServiceListener(ConsoleFactory.this);
+							bundleContext.removeBundleListener(ConsoleFactory.this);
+							
+							executeCommands();
+							break;
+						}
 					} catch (InterruptedException e) {
 						log.info("Interrupted", e);
 						break;
@@ -379,9 +439,14 @@ public class ConsoleFactory implements BundleListener, ServiceListener, Blueprin
      * Checks if the OSGi runtime is "stable" and calls {@link ConsoleFactory#invokeExecutor()}.
      */
     private void invokeExecutorIfStable() {
-		boolean prevState = executorInvoked.getAndSet(executorInvoked.get() ||
-				(runtimeStatus.unstableBundles <= 0 && runtimeStatus.unstableBlueprints <= 0));
-		if (prevState == false && executorInvoked.get()) {
+//		final List<String> unstableBundles = runtimeStatus.getUnstableBundles();
+//		boolean prevState = executorInvoked.getAndSet(executorInvoked.get() ||
+//				(/*runtimeStatus.unstableBundles <= 0 &&*/ unstableBundles.size() <= 0));
+//    	if (prevState == false && executorInvoked.get()) {
+//			invokeExecutor();
+//		}
+		boolean prevState = executorInvoked.getAndSet(true);
+		if (prevState == false) {
 			invokeExecutor();
 		}
     }
