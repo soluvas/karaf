@@ -85,7 +85,7 @@ public class ConsoleFactory implements BundleListener, ServiceListener, Blueprin
 		/**
 		 * Number of OSGi framework events that has happened so far.
 		 */
-		public volatile AtomicInteger events = new AtomicInteger();
+		public AtomicInteger events = new AtomicInteger();
 		public Map<String, Integer> bundles = new ConcurrentHashMap<String, Integer>();
 		public Map<String, Integer> blueprints = new ConcurrentHashMap<String, Integer>();
 		
@@ -306,6 +306,54 @@ public class ConsoleFactory implements BundleListener, ServiceListener, Blueprin
 		}
     	// Register Blueprint listener, must be last to avoid deadlock on runtimeStatus
     	blueprintListenerReg = bundleContext.registerService(BlueprintListener.class.getName(), this, new Hashtable<String, String>());
+    	
+        /**
+         * Waits for OSGi runtime to stabilize for the last time, then executes commands in "karaf.commands"
+         * by calling {@link ConsoleFactory#executeCommands()}.
+         */
+    	log.info("Waiting for OSGi runtime to stabilize before executing commands");
+    	new Thread("Waiting for OSGi runtime to stabilize before executing commands") {
+    		@Override
+    		public void run() {
+				while (true) {
+					try {
+						// save the current state before waiting
+						int lastEvents = runtimeStatus.events.get();
+						final List<String> preUnstableBundles = runtimeStatus.getUnstableBundles();
+						final long waitTime = preUnstableBundles.isEmpty() ? 10 : 5000;
+						log.info("Waiting {} ms for {} unstable bundles before launching command: {}",
+								new Object[] { waitTime, preUnstableBundles.size(), preUnstableBundles });
+		    			synchronized (runtimeStatus) {
+		    				runtimeStatus.wait(waitTime);
+		    			}
+
+//							System.out.print("*" + sth.activeServices + " ");
+						final List<String> postUnstableBundles = runtimeStatus.getUnstableBundles();
+						// launch command if there are no more events, and all bundles are stable
+						if (lastEvents == runtimeStatus.events.get() /*&& runtimeStatus.unstableBundles <= 0*/ && 
+								postUnstableBundles.size() <= 0) {
+//								log.info("Time to launch command! {} services found", runtimeStatus.activeServices);
+							log.info("Time to launch command!");
+//								System.out.println(String.format("Time to launch command! %d services found", sth.activeServices));
+							
+							// Unregister listeners
+							if (blueprintListenerReg != null) {
+								blueprintListenerReg.unregister();
+								blueprintListenerReg = null;
+							}
+							bundleContext.removeServiceListener(ConsoleFactory.this);
+							bundleContext.removeBundleListener(ConsoleFactory.this);
+							
+							executeCommands();
+							break;
+						}
+					} catch (InterruptedException e) {
+						log.info("Thread wait monitor was interrupted", e);
+						break;
+					}
+    			}
+    		}
+    	}.start();
 	}
 
 	public void bundleChanged(BundleEvent event) {
@@ -319,7 +367,6 @@ public class ConsoleFactory implements BundleListener, ServiceListener, Blueprin
 			synchronized (runtimeStatus) {
 				runtimeStatus.notify();
 			}
-			invokeExecutorIfStable();
 		}
 	}
 
@@ -329,7 +376,6 @@ public class ConsoleFactory implements BundleListener, ServiceListener, Blueprin
 			synchronized (runtimeStatus) {
 				runtimeStatus.notify();
 			}
-			invokeExecutorIfStable();
 		}
 	}
 
@@ -340,7 +386,6 @@ public class ConsoleFactory implements BundleListener, ServiceListener, Blueprin
 			synchronized (runtimeStatus) {
 				runtimeStatus.notify();
 			}
-			invokeExecutorIfStable();
 		}
 	}
 	
@@ -384,71 +429,5 @@ public class ConsoleFactory implements BundleListener, ServiceListener, Blueprin
 			log.error("Error when shutting down", e);
 		}
     }
-    
-    /**
-     * Waits for OSGi runtime to stabilize for the last time, then executes commands in "karaf.commands"
-     * by calling {@link ConsoleFactory#executeCommands()}.
-     */
-    private void invokeExecutor() {
-    	log.info("Waiting for OSGi runtime to stabilize");
-    	new Thread("Wait for stable") {
-    		@Override
-    		public void run() {
-				while (true) {
-					try {
-						// save the current state before waiting
-						int lastEvents = runtimeStatus.events.get();
-						final List<String> preUnstableBundles = runtimeStatus.getUnstableBundles();
-						final long waitTime = preUnstableBundles.size() > 0 ? 5000 : 10;
-						log.info("Waiting {} ms for {} unstable bundles before launching command: {}",
-								new Object[] { waitTime, preUnstableBundles.size(), preUnstableBundles });
-		    			synchronized (runtimeStatus) {
-		    				runtimeStatus.wait(waitTime);
-		    			}
 
-//							System.out.print("*" + sth.activeServices + " ");
-						final List<String> postUnstableBundles = runtimeStatus.getUnstableBundles();
-						// launch command if there are no more events, and all bundles are stable
-						if (lastEvents == runtimeStatus.events.get() /*&& runtimeStatus.unstableBundles <= 0*/ && 
-								postUnstableBundles.size() <= 0) {
-//								log.info("Time to launch command! {} services found", runtimeStatus.activeServices);
-							log.info("Time to launch command!");
-//								System.out.println(String.format("Time to launch command! %d services found", sth.activeServices));
-							
-							// Unregister listeners
-							if (blueprintListenerReg != null) {
-								blueprintListenerReg.unregister();
-								blueprintListenerReg = null;
-							}
-							bundleContext.removeServiceListener(ConsoleFactory.this);
-							bundleContext.removeBundleListener(ConsoleFactory.this);
-							
-							executeCommands();
-							break;
-						}
-					} catch (InterruptedException e) {
-						log.info("Interrupted", e);
-						break;
-					}
-    			}
-    		}
-    	}.start();
-	}
-
-    /**
-     * Checks if the OSGi runtime is "stable" and calls {@link ConsoleFactory#invokeExecutor()}.
-     */
-    private void invokeExecutorIfStable() {
-//		final List<String> unstableBundles = runtimeStatus.getUnstableBundles();
-//		boolean prevState = executorInvoked.getAndSet(executorInvoked.get() ||
-//				(/*runtimeStatus.unstableBundles <= 0 &&*/ unstableBundles.size() <= 0));
-//    	if (prevState == false && executorInvoked.get()) {
-//			invokeExecutor();
-//		}
-		boolean prevState = executorInvoked.getAndSet(true);
-		if (prevState == false) {
-			invokeExecutor();
-		}
-    }
-    
 }
