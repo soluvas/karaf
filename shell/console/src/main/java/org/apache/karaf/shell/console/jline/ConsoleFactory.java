@@ -169,8 +169,11 @@ public class ConsoleFactory implements BundleListener, ServiceListener, Blueprin
     }
 
     protected void stop() throws Exception {
+        // The bundle is stopped
+        // so close the console and remove the callback so that the
+        // osgi framework isn't stopped
         if (console != null) {
-            console.close();
+            console.close(false);
         }
     }
 
